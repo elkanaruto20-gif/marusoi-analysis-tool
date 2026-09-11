@@ -1,0 +1,565 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marusoi EVEN ↔ ODD Demo Bot — Fixed</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#07111f;color:#eaf2ff;font-family:system-ui,Arial,sans-serif}
+.wrap{max-width:1050px;margin:auto;padding:18px}
+.card{background:#0d1a2b;border:1px solid #1d3350;border-radius:18px;padding:18px;margin:12px 0}
+h1{margin:0 0 5px}.muted{color:#91a5bf}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+label{display:block;font-size:13px;color:#9eb1ca;margin-bottom:6px}
+input,select{width:100%;padding:12px;border-radius:10px;border:1px solid #29415f;background:#091523;color:#fff}
+button{border:0;border-radius:10px;padding:12px 16px;font-weight:700;cursor:pointer}
+button:disabled{opacity:.45;cursor:not-allowed}
+.primary{background:#21c77a;color:#04140d}.danger{background:#f05b68;color:white}.secondary{background:#243a56;color:#fff}
+.status{display:flex;align-items:center;gap:10px}.dot{width:10px;height:10px;border-radius:50%;background:#f0b429}.dot.ok{background:#21c77a}
+.mode{font-size:34px;font-weight:800;text-align:center;padding:18px;border-radius:14px;background:#142840}
+.mode.even{border:1px solid #21c77a}.mode.odd{border:1px solid #f0b429}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.stat{background:#091523;padding:12px;border-radius:10px}.stat b{display:block;font-size:20px}
+.log{height:300px;overflow:auto;background:#07101c;border-radius:10px;padding:10px;font-family:monospace;font-size:12px}
+.row{padding:5px 0;border-bottom:1px solid #14283d}
+.warn{font-size:13px;color:#ffd37a;line-height:1.5}
+.account{font-size:13px;color:#b8c8dc;margin-top:10px}
+@media(max-width:650px){.stats{grid-template-columns:repeat(2,1fr)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Marusoi EVEN ↔ ODD Demo Bot</h1>
+    <div class="muted">Demo-only automatic switching bot for Deriv digit contracts.</div>
+  </div>
+
+  <div class="card">
+    <div class="grid">
+      <div>
+        <label>Deriv App ID</label>
+        <input id="appId" placeholder="Your current Deriv App ID">
+      </div>
+      <div>
+        <label>Demo API token / PAT</label>
+        <input id="token" type="password" autocomplete="off" placeholder="Paste your demo PAT">
+      </div>
+      <div>
+        <label>Demo account</label>
+        <select id="account" disabled>
+          <option value="">Connect to load demo accounts</option>
+        </select>
+      </div>
+      <div>
+        <label>Symbol</label>
+        <select id="symbol">
+          <option value="R_10">Volatility 10 Index</option>
+          <option value="R_25">Volatility 25 Index</option>
+          <option value="R_50">Volatility 50 Index</option>
+          <option value="R_75">Volatility 75 Index</option>
+          <option value="R_100">Volatility 100 Index</option>
+          <option value="1HZ10V">Volatility 10 (1s)</option>
+          <option value="1HZ25V">Volatility 25 (1s)</option>
+          <option value="1HZ50V">Volatility 50 (1s)</option>
+          <option value="1HZ75V">Volatility 75 (1s)</option>
+          <option value="1HZ100V">Volatility 100 (1s)</option>
+        </select>
+      </div>
+      <div>
+        <label>Stake (USD)</label>
+        <input id="stake" type="number" min="0.35" step="0.01" value="0.35">
+      </div>
+      <div>
+        <label>Duration (ticks)</label>
+        <input id="duration" type="number" min="1" max="10" value="1">
+      </div>
+      <div>
+        <label>Initial marker</label>
+        <select id="initial"><option>EVEN</option><option>ODD</option></select>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:14px">
+      <button class="primary" id="connect">Connect Demo</button>
+      <button class="secondary" id="start" disabled>Start Bot</button>
+      <button class="danger" id="stop" disabled>Stop</button>
+    </div>
+
+    <p class="warn">
+      Demo only. Use a PAT with the <b>trade</b> scope. Never paste a real-account token here.
+      This bot can lose demo funds; EVEN/ODD switching does not guarantee profit.
+    </p>
+    <div class="status"><span id="dot" class="dot"></span><span id="status">Disconnected</span></div>
+    <div id="accountInfo" class="account"></div>
+  </div>
+
+  <div class="card">
+    <div id="mode" class="mode even">NEXT: EVEN</div>
+    <div class="stats" style="margin-top:12px">
+      <div class="stat">Wins<b id="wins">0</b></div>
+      <div class="stat">Losses<b id="losses">0</b></div>
+      <div class="stat">Trades<b id="trades">0</b></div>
+      <div class="stat">Profit<b id="profit">0.00</b></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <b>Trade log</b>
+    <div id="log" class="log" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+
+const API_BASE = "https://api.derivws.com";
+
+let ws = null;
+let req = 0;
+let botRunning = false;
+let authenticated = false;
+let connecting = false;
+
+let mode = "EVEN";
+let currentContract = null;
+let pendingProposal = false;
+let contractSubId = null;
+let tickSubId = null;
+let accountId = "";
+
+let stats = {wins:0, losses:0, trades:0, profit:0};
+const finishedContracts = new Set();
+
+function log(s){
+  const d = document.createElement("div");
+  d.className = "row";
+  d.textContent = new Date().toLocaleTimeString() + "  " + s;
+  $("log").prepend(d);
+}
+
+function setStatus(s, ok=false){
+  $("status").textContent = s;
+  $("dot").className = "dot" + (ok ? " ok" : "");
+}
+
+function resetStats(){
+  stats = {wins:0, losses:0, trades:0, profit:0};
+  render();
+}
+
+function render(){
+  $("mode").textContent = "NEXT: " + mode;
+  $("mode").className = "mode " + mode.toLowerCase();
+  $("wins").textContent = stats.wins;
+  $("losses").textContent = stats.losses;
+  $("trades").textContent = stats.trades;
+  $("profit").textContent = stats.profit.toFixed(2);
+}
+
+function send(o){
+  if(!ws || ws.readyState !== WebSocket.OPEN){
+    throw new Error("WebSocket is not connected");
+  }
+  o.req_id = ++req;
+  ws.send(JSON.stringify(o));
+  return o.req_id;
+}
+
+function tokenAndApp(){
+  const app = $("appId").value.trim();
+  const token = $("token").value.trim();
+  if(!app || !token){
+    throw new Error("Enter your current Deriv App ID and demo PAT.");
+  }
+  return {app, token};
+}
+
+/* Current Deriv API:
+   1) PAT + Deriv-App-ID -> GET demo Options accounts
+   2) POST account/{id}/otp
+   3) Connect to the returned authenticated WebSocket URL
+*/
+async function getDemoAccounts(app, token){
+  const response = await fetch(API_BASE + "/trading/v1/options/accounts", {
+    method: "GET",
+    headers: {
+      "Authorization": "Bearer " + token,
+      "Deriv-App-ID": app
+    }
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if(!response.ok){
+    const msg = data?.errors?.[0]?.message || ("HTTP " + response.status);
+    throw new Error("Account lookup failed: " + msg);
+  }
+
+  const list = Array.isArray(data.data) ? data.data : [];
+  const demos = list.filter(a => String(a.account_type || "").toLowerCase() === "demo");
+
+  if(!demos.length){
+    throw new Error("No Options demo account was returned for this token.");
+  }
+
+  return demos;
+}
+
+async function getOtpUrl(app, token, id){
+  const response = await fetch(
+    API_BASE + "/trading/v1/options/accounts/" + encodeURIComponent(id) + "/otp",
+    {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + token,
+        "Deriv-App-ID": app
+      }
+    }
+  );
+
+  const data = await response.json().catch(() => ({}));
+
+  if(!response.ok){
+    const msg = data?.errors?.[0]?.message || ("HTTP " + response.status);
+    throw new Error("OTP request failed: " + msg);
+  }
+
+  const url = data?.data?.url;
+  if(!url) throw new Error("Deriv did not return a WebSocket URL.");
+  return url;
+}
+
+function populateAccounts(accounts){
+  const sel = $("account");
+  sel.innerHTML = "";
+
+  for(const a of accounts){
+    const option = document.createElement("option");
+    option.value = a.account_id;
+    option.textContent =
+      a.account_id + " • " + (a.currency || "USD") +
+      " • Balance " + Number(a.balance ?? 0).toFixed(2);
+    sel.appendChild(option);
+  }
+
+  sel.disabled = false;
+  accountId = sel.value;
+  sel.onchange = () => {
+    accountId = sel.value;
+  };
+}
+
+async function connect(){
+  if(connecting) return;
+
+  try{
+    connecting = true;
+    botRunning = false;
+    authenticated = false;
+    $("start").disabled = true;
+    $("stop").disabled = true;
+
+    const {app, token} = tokenAndApp();
+
+    if(ws){
+      try{ ws.close(); }catch(e){}
+      ws = null;
+    }
+
+    setStatus("Checking demo accounts...");
+    log("Using current Deriv REST authentication.");
+
+    const accounts = await getDemoAccounts(app, token);
+    populateAccounts(accounts);
+
+    accountId = $("account").value;
+    if(!accountId) throw new Error("Select a demo account.");
+
+    const selected = accounts.find(a => a.account_id === accountId);
+    $("accountInfo").textContent =
+      "Connected account target: " + accountId +
+      " • " + (selected?.currency || "USD") +
+      " • Demo";
+
+    setStatus("Requesting secure WebSocket...");
+    const wsUrl = await getOtpUrl(app, token, accountId);
+
+    setStatus("Opening authenticated demo connection...");
+    ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      authenticated = true;
+      connecting = false;
+      setStatus("Demo connected: " + accountId, true);
+      $("start").disabled = false;
+      $("stop").disabled = true;
+      log("Authenticated demo WebSocket connected.");
+
+      try{ send({balance:1, subscribe:1}); }catch(e){ log(e.message); }
+      try{
+        tickSubId = send({
+          ticks: $("symbol").value,
+          subscribe: 1
+        });
+      }catch(e){ log(e.message); }
+    };
+
+    ws.onmessage = e => {
+      try{
+        handle(JSON.parse(e.data));
+      }catch(err){
+        log("Invalid server message.");
+      }
+    };
+
+    ws.onerror = () => {
+      connecting = false;
+      setStatus("WebSocket error — check App ID/PAT and browser connection.");
+      log("WebSocket error.");
+    };
+
+    ws.onclose = () => {
+      connecting = false;
+      authenticated = false;
+      botRunning = false;
+      currentContract = null;
+      pendingProposal = false;
+      $("start").disabled = true;
+      $("stop").disabled = true;
+      setStatus("Disconnected");
+      log("WebSocket closed.");
+    };
+
+  }catch(e){
+    connecting = false;
+    authenticated = false;
+    setStatus("Connection failed");
+    log("ERROR: " + e.message);
+    alert(e.message);
+  }
+}
+
+function handle(d){
+  if(d.error){
+    const msg = d.error.message || d.error.code || "Unknown API error";
+    log("API ERROR: " + msg);
+
+    // Do not leave the bot permanently locked after a rejected proposal.
+    if(d.req_id && pendingProposal){
+      pendingProposal = false;
+      if(botRunning) setTimeout(placeTrade, 800);
+    }
+    return;
+  }
+
+  if(d.msg_type === "balance"){
+    const b = d.balance || {};
+    log("Balance: " + (b.balance ?? "?") + " " + (b.currency ?? ""));
+    return;
+  }
+
+  if(d.msg_type === "tick"){
+    return;
+  }
+
+  if(d.msg_type === "proposal"){
+    if(!botRunning || !pendingProposal || currentContract) return;
+
+    const p = d.proposal;
+    if(!p || !p.id) return;
+
+    const price = Number(p.ask_price);
+    if(!(price > 0)){
+      pendingProposal = false;
+      log("Proposal had no valid ask price.");
+      setTimeout(placeTrade, 800);
+      return;
+    }
+
+    pendingProposal = false;
+    log(mode + " proposal received. Buying at " + price.toFixed(2));
+
+    try{
+      send({buy:p.id, price:price});
+    }catch(e){
+      log("BUY ERROR: " + e.message);
+      if(botRunning) setTimeout(placeTrade, 800);
+    }
+    return;
+  }
+
+  if(d.msg_type === "buy"){
+    const c = d.buy || {};
+    if(!c.contract_id){
+      log("BUY response did not contain a contract ID.");
+      if(botRunning) setTimeout(placeTrade, 800);
+      return;
+    }
+
+    currentContract = c.contract_id;
+    stats.trades++;
+    render();
+
+    log("BOUGHT " + mode + " | Contract #" + currentContract);
+
+    try{
+      contractSubId = send({
+        proposal_open_contract: 1,
+        contract_id: currentContract,
+        subscribe: 1
+      });
+    }catch(e){
+      log("Contract subscription error: " + e.message);
+    }
+    return;
+  }
+
+  if(d.msg_type === "proposal_open_contract"){
+    const c = d.proposal_open_contract;
+    if(!c || Number(c.contract_id) !== Number(currentContract)) return;
+
+    const terminal =
+      c.is_sold ||
+      c.status === "won" ||
+      c.status === "lost" ||
+      c.status === "sold";
+
+    if(terminal){
+      finishTrade(c);
+    }
+  }
+}
+
+function finishTrade(c){
+  const id = String(c.contract_id);
+
+  // A subscribed contract can send more than one terminal-looking update.
+  if(finishedContracts.has(id)) return;
+  finishedContracts.add(id);
+
+  const pnl = Number(c.profit || 0);
+  const won = pnl > 0 || c.status === "won";
+
+  stats.profit += pnl;
+
+  if(won){
+    stats.wins++;
+    log(
+      "RESULT: WIN | P/L " + pnl.toFixed(2) +
+      " | staying " + mode
+    );
+  }else{
+    stats.losses++;
+    const old = mode;
+    mode = mode === "EVEN" ? "ODD" : "EVEN";
+    log(
+      "RESULT: LOSS | P/L " + pnl.toFixed(2) +
+      " | switching " + old + " -> " + mode
+    );
+  }
+
+  currentContract = null;
+  contractSubId = null;
+  render();
+
+  if(botRunning){
+    setTimeout(placeTrade, 800);
+  }
+}
+
+function placeTrade(){
+  if(!botRunning || !authenticated || currentContract || pendingProposal) return;
+
+  const symbol = $("symbol").value;
+  const stake = Number($("stake").value);
+  const duration = Math.max(
+    1,
+    Math.min(10, Number($("duration").value))
+  );
+
+  if(!(stake > 0)){
+    log("Invalid stake.");
+    return;
+  }
+
+  const ct = mode === "EVEN" ? "DIGITEVEN" : "DIGITODD";
+
+  pendingProposal = true;
+
+  log(
+    "Requesting " + ct +
+    " proposal on " + symbol +
+    " for " + duration + " tick(s)..."
+  );
+
+  try{
+    send({
+      proposal: 1,
+      amount: stake,
+      basis: "stake",
+      contract_type: ct,
+      currency: "USD",
+      duration: duration,
+      duration_unit: "t",
+      underlying_symbol: symbol,
+      subscribe: 0
+    });
+  }catch(e){
+    pendingProposal = false;
+    log("PROPOSAL ERROR: " + e.message);
+  }
+}
+
+$("connect").onclick = connect;
+
+$("start").onclick = () => {
+  if(!authenticated){
+    alert("Connect the demo account first.");
+    return;
+  }
+
+  mode = $("initial").value;
+  resetStats();
+  finishedContracts.clear();
+
+  botRunning = true;
+  $("start").disabled = true;
+  $("stop").disabled = false;
+
+  render();
+  log("BOT STARTED. First marker: " + mode);
+  placeTrade();
+};
+
+$("stop").onclick = () => {
+  botRunning = false;
+  pendingProposal = false;
+  $("start").disabled = !authenticated;
+  $("stop").disabled = true;
+
+  log("BOT STOPPED. Existing contract is not forcibly sold.");
+  setStatus(authenticated ? "Demo connected" : "Disconnected", authenticated);
+};
+
+$("symbol").addEventListener("change", () => {
+  if(!authenticated || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  try{
+    if(tickSubId) send({forget:tickSubId});
+    tickSubId = send({
+      ticks: $("symbol").value,
+      subscribe: 1
+    });
+    log("Tick stream changed to " + $("symbol").value);
+  }catch(e){
+    log(e.message);
+  }
+});
+
+render();
+</script>
+</body>
+</html>
