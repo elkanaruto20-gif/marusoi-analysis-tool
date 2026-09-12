@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Marusoi Analysis Tool — Demo</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0d1117;color:#f5f7fa;font-family:Arial,sans-serif}
+.wrap{max-width:900px;margin:auto;padding:18px}.brand{font-size:28px;font-weight:800;margin:8px 0 4px}.brand span{color:#ff3b5c}.sub{color:#9aa4b2;margin-bottom:18px}
+.card{background:#151b24;border:1px solid #293241;border-radius:16px;padding:16px;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}@media(max-width:600px){.grid{grid-template-columns:1fr}}
+label{display:block;color:#aab4c2;font-size:13px;margin-bottom:6px}input,select{width:100%;padding:12px;border-radius:10px;border:1px solid #364152;background:#0e141c;color:white}
+button{border:0;border-radius:10px;padding:12px 16px;font-weight:700;cursor:pointer;margin:5px 5px 0 0}
+.primary{background:#ff3b5c;color:#fff}.secondary{background:#263244;color:#fff}.danger{background:#7d2434;color:#fff}
+.status{padding:10px;border-radius:10px;background:#101722;color:#b9c3d0}.ok{color:#45d483}.warn{color:#ffd166}.bad{color:#ff657d}
+.big{font-size:30px;font-weight:800}.mode{font-size:22px;font-weight:800}.log{height:180px;overflow:auto;background:#0a0f15;border-radius:10px;padding:10px;font-family:monospace;font-size:12px;white-space:pre-wrap}
+small{color:#7f8a99}.note{font-size:12px;color:#aab4c2;line-height:1.5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span>marusoi</span> Analysis Tool</div>
+  <div class="sub">EVEN ↔ ODD Demo Trading Bot</div>
+
+  <div class="card">
+    <div id="status" class="status">Disconnected</div>
+    <div class="grid" style="margin-top:12px">
+      <div><label>Deriv App ID</label><input id="appid" placeholder="Your Deriv App ID"></div>
+      <div><label>Demo API token</label><input id="token" type="password" placeholder="Paste your demo token here"></div>
+      <div><div><label>Market</label><select id="symbol"><option value="R_100">Volatility 100 (1s)</option><option value="R_75">Volatility 75 (1s)</option><option value="R_50">Volatility 50 (1s)</option><option value="R_25">Volatility 25 (1s)</option><option value="R_10">Volatility 10 (1s)</option></select></div></div>
+      <div><div><label>Stake (USD)</label><input id="stake" type="number" min="0.35" step="0.01" value="1"></div></div>
+    </div>
+    <button class="primary" id="connect">Connect Demo</button>
+    <button class="secondary" id="disconnect">Disconnect</button>
+    <div class="note">For safety, this single-file version keeps the token only in this browser tab and does not save it. For a public production site, use Deriv OAuth/server-side token handling instead.</div>
+  </div>
+
+  <div class="grid">
+    <div class="card"><small>LAST DIGIT</small><div id="digit" class="big">—</div><div id="quote">—</div></div>
+    <div class="card"><small>CURRENT SIDE</small><div id="mode" class="mode">EVEN</div><div id="reason">Waiting to start</div></div>
+    <div class="card"><small>DEMO BALANCE</small><div id="balance" class="big">—</div></div>
+    <div class="card"><small>RESULT</small><div id="result">No trades yet</div></div>
+  </div>
+
+  <div class="card">
+    <button class="primary" id="start" disabled>Start Auto</button>
+    <button class="danger" id="stop">Stop</button>
+    <div class="status" style="margin-top:10px">
+      Strategy: <b>EVEN</b> → after a loss switch to <b>ODD</b> → after a loss switch back to <b>EVEN</b>.
+      A win keeps the current side.
+    </div>
+  </div>
+
+  <div class="card"><small>ACTIVITY LOG</small><div id="log" class="log"></div></div>
+
+  <div class="card">
+    <div class="note">
+      DEMO ONLY. Automated trading can lose money. Test with a small demo stake and verify the contract result before using any live account.
+      This page uses the Deriv WebSocket API directly. Deriv's current documentation recommends OAuth 2.0 for browser/web dashboards and server-side token storage for production.
+    </div>
+  </div>
+</div>
+
+<script>
+let ws=null, connected=false, running=false, waiting=false, currentSide="EVEN";
+let req=1, activeContract=null, lastDigit=null, pendingProposal=null;
+
+const $=id=>document.getElementById(id);
+const log=m=>{const t=new Date().toLocaleTimeString();$("log").textContent+=`[${t}] ${m}\\n`;$("log").scrollTop=$("log").scrollHeight};
+function status(t,c=""){ $("status").textContent=t; $("status").className="status "+c; }
+function send(o){ if(ws&&ws.readyState===1){o.req_id=req++;ws.send(JSON.stringify(o));} }
+function setMode(){ $("mode").textContent=currentSide; $("mode").style.color=currentSide==="EVEN"?"#5bd6ff":"#ff9f68"; }
+
+$("connect").onclick=()=>{
+ const app=$("appid").value.trim(), token=$("token").value.trim();
+ if(!app||!token){alert("Enter your Deriv App ID and Demo API token.");return;}
+ if(ws) ws.close();
+ ws=new WebSocket("wss://ws.derivws.com/websockets/v3?app_id="+encodeURIComponent(app));
+ ws.onopen=()=>{connected=true;status("Connected — authorizing","ok");log("WebSocket connected.");send({authorize:token});};
+ ws.onclose=()=>{connected=false;waiting=false;$("start").disabled=true;status("Disconnected","bad");log("Disconnected.");};
+ ws.onerror=()=>{status("Connection error","bad");log("WebSocket error.");};
+ ws.onmessage=e=>handle(JSON.parse(e.data));
+};
+
+$("disconnect").onclick=()=>{running=false;waiting=false;if(ws)ws.close();};
+$("start").onclick=()=>{if(connected){running=true;currentSide="EVEN";setMode();$("reason").textContent="Auto mode running";log("AUTO START: beginning with EVEN.");}};
+$("stop").onclick=()=>{running=false;waiting=false;$("reason").textContent="Stopped";log("AUTO STOP.");};
+
+function handle(d){
+ if(d.error){log("ERROR: "+(d.error.message||JSON.stringify(d.error))); if(d.req_id){waiting=false;pendingProposal=null;} return;}
+ if(d.msg_type==="authorize"){
+   status("Demo account authorized","ok");log("Authorized as "+(d.authorize.loginid||"demo"));
+   $("start").disabled=false;
+   send({balance:1,subscribe:1});
+   send({ticks:$("symbol").value,subscribe:1});
+ }
+ if(d.msg_type==="balance"){ $("balance").textContent=(d.balance.balance??d.balance).toString()+" "+(d.balance.currency||""); }
+ if(d.msg_type==="tick"){
+   const q=d.tick.quote; $("quote").textContent=q;
+   const s=String(q).replace(".",""); lastDigit=Number(s.slice(-1));
+   $("digit").textContent=lastDigit;
+   if(running&&!waiting) maybeTrade();
+ }
+ if(d.msg_type==="proposal"){
+   pendingProposal=d.proposal;
+   if(running && pendingProposal && pendingProposal.id){
+     waiting=true;
+     send({buy:pendingProposal.id,price:Number(pendingProposal.ask_price)});
+     log("Buying "+currentSide+" proposal. Ask: "+pendingProposal.ask_price);
+   }
+ }
+ if(d.msg_type==="buy"){
+   activeContract=d.buy.contract_id;
+   log("Contract bought: "+activeContract);
+   send({proposal_open_contract:1,contract_id:activeContract,subscribe:1});
+ }
+ if(d.msg_type==="proposal_open_contract"){
+   const c=d.proposal_open_contract;
+   if(c.is_sold || c.status==="sold" || c.is_expired){
+      const profit=Number(c.profit||0), win=profit>0;
+      $("result").innerHTML=(win?'<span class="ok">WIN</span> ':'<span class="bad">LOSS</span> ')+profit.toFixed(2);
+      log((win?"WIN":"LOSS")+" | profit "+profit.toFixed(2));
+      activeContract=null;waiting=false;pendingProposal=null;
+      if(!win){currentSide=currentSide==="EVEN"?"ODD":"EVEN";setMode();$("reason").textContent="Loss → switched side";log("LOSS SWITCH → "+currentSide);}
+      else {$("reason").textContent="Win → stay "+currentSide;log("WIN → staying "+currentSide);}
+   }
+ }
+}
+function maybeTrade(){
+ if(lastDigit===null) return;
+ // Request a fresh one-tick digit contract. The contract resolves on the next tick.
+ const side=currentSide==="EVEN"?"DIGITEVEN":"DIGITODD";
+ const symbol=$("symbol").value;
+ send({proposal:1,amount:Number($("stake").value),basis:"stake",contract_type:side,currency:"USD",duration:1,duration_unit:"t",symbol:symbol});
+ log("Requesting "+currentSide+" proposal on "+symbol);
+}
+setMode();
+</script>
+</body>
+</html>
